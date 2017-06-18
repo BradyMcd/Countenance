@@ -2,10 +2,14 @@
 #ifndef MEMORY_H
 #define MEMORY_H
 
+struct countenance_config{
+  size_t fw_n_members;
+};
+
 // Varible width, resizable allocations
-void *my_malloc( size_t );
-void *my_realloc( void*, size_t )
-void my_free( void* );
+void *rw_malloc( size_t );
+void *rw_realloc( void*, size_t );
+void rw_free( void* );
 
 // Fixed width, recycling allocations
 void *fw_malloc( size_t );
