@@ -5,6 +5,8 @@
 
 static struct countenance_config mem_cfg = { 256 };
 
+
+
 /**
  * Memory records are of fixed width... hmmm...
  */
@@ -138,8 +140,18 @@ void fw_free( void *ptr ){
   }
   if( manager == NULL ){ /* This case is undefined by the standard definition of free */ }
 
+  /* TODO: Everything below this line feels very special case heavy */
   curr = manager->available;
+  if( curr == NULL ){
+    temp = bs_fw_malloc();
+    temp->n = 1;
+    temp->ptr = ptr;
+    temp->next = NULL;
+    manager->available = temp;
+    return;
+  }
 
+  /* Reordering these cases have potential performance effects */
   while( 1 ){
     if( curr->ptr == ptr + manager->width ){
       curr->ptr = ptr;
