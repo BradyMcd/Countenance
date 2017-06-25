@@ -1,12 +1,11 @@
 
 #include <malloc.h>
+#include <unistd.h>
 
 #include "memory.h"
 
-static struct countenance_config mem_cfg = { 256 };
-
-
-
+#define SIZE_CLASSES 32
+static long page_size = sysconfig( _GET_PAGESIZE );
 /**
  * Memory records are of fixed width... hmmm...
  */
@@ -19,12 +18,11 @@ typedef struct fw_record{
 
 struct fw_manager{
   fw_record *available;
-  size_t width;
-  char buffer[];
+  struct fw_manager *next;
+  void *page;
 };
 
-static struct fw_manager **fw_buffer = NULL;
-static size_t fw_managers = 0;
+static struct fw_manager fw_bins[SIZE_CLASSES] = NULL;
 
 static fw_record *bs_fw_malloc(){
   return malloc( sizeof( fw_record ) );
@@ -55,36 +53,45 @@ void rw_free( void *ptr ){
  * Fixed width, recyclable allocations
  */
 
-struct fw_manager *fw_new_mgr( size_t width ){
+size_t fit_to_size_class( size_t width ){
 
-  struct fw_manager *ret = NULL;
-  struct fw_manager **temp = NULL;
+  /* sizeof only returns aligned widths
+     META: We can decide on which allocator to use based on the width passed in*/
+  size_t r = 0;
+  size_t t = width;
 
-  /* TODO: This should end up being a bufferlist type
-   * Most of the bootstrapping should probably have the option to be statically allocated
-   * The only malloc which is truly unavoidable is claiming the memory pages, managers can
-   * concievably be static, worst cases are pretty simple to calculate and testing can reveal
-   * saner limits for things like the list of managers
-   */
+  while( t >>= 1){
+    ++r;
+  }
 
-  temp = realloc( fw_buffer, sizeof(struct fw_manager*) * ( fw_managers + 1 ) );
-  if( temp == NULL ){ return NULL; }
-  fw_buffer = temp;
+  if( width && !( width & ( width - 1 ) ) )
+    --r;
 
-  ret = malloc( sizeof(struct fw_manager) + ( width * mem_cfg.fw_n_members ) );
-  if( ret == NULL ){ return NULL; }
+  return r;
+}
 
-  ret->available = bs_fw_malloc();
-  if( ret->available == NULL ){ return NULL; }
+fw_record *fw_claim( size_t width ){
 
-  ret->available->ptr = ret->buffer;
-  ret->available->n = mem_cfg.fw_n_members;
-  ret->available->next = NULL;
+  /* META: This is going to be POSIX compliant, so we won't be passing
+     the fw_ prefix any requests over the page size, those are to be handled by a
+     different interface which will mmap() rather than sbrk() to claim space
+  */
 
-  fw_buffer[fw_managers] = ret;
-  fw_managers += 1;
+  size_t n = ( page_size - sizeof( struct fw_manager ) ) / width;
+  struct fw_manager *new = sbrk( page_size );
+  if( new == -1 ){ /*ENOMEM*/ }
 
-  return ret;
+  new->page = &(new + 1);
+  new->next = NULL;
+
+  new->available = bs_fw_malloc();
+  if( new->available == NULL ){ /*ENOMEM*/ }
+
+  new->available->n = n;
+  new->available->ptr = new->page;
+  new->available->next = NULL;
+
+  return new->available;
 }
 
 /*FW PUBLIC*/
@@ -92,28 +99,20 @@ struct fw_manager *fw_new_mgr( size_t width ){
 void *fw_malloc( size_t size ){
 
   int i;
-  struct fw_manager *buffer = NULL;
+  struct fw_manager *buffer;
   fw_record *curr = NULL;
   void *ret = NULL;
 
-  for( i = 0; i < fw_managers && curr == NULL; ++i ){
-    buffer = fw_buffer[i];
-    if( buffer->width == size ){
-      curr = buffer->available;
-    }
-  }
-  if( curr == NULL ){
-    buffer = fw_new_mgr( size );
-    if( buffer == NULL ){ return NULL; }
+  buffer = fw_bins[fit_to_size_class( size )];
+  curr = ( buffer->available != NULL ) ? buffer->available : fw_claim( size );
+  if( curr == NULL ){ /* ENOMEM */ }
 
-    curr = buffer->available;
-  }
   /* curr is a record, curr->ptr is the first piece of open space */
 
   ret = curr->ptr;
   curr->n -= 1;
   if( curr->n != 0 ){
-    curr->ptr = curr->ptr + 1;
+    curr->ptr = curr->ptr + size;
   }else{
     buffer->available = curr->next;
     bs_fw_free( curr );
@@ -123,22 +122,31 @@ void *fw_malloc( size_t size ){
 }
 
 void fw_free( void *ptr ){
+
   int i;
   struct fw_manager *manager = NULL;
-  fw_record *curr;
   fw_record *temp;
+  fw_record *curr;
 
   if( !ptr ){ return; } /* If ptr is NULL no action is performed */
 
-  /* Find the manager corresponding to ptr */
-  for( i = 0; i < fw_managers && !manager; ++i ){
-    manager = fw_buffer[i];
-    if( (char*)ptr <= manager->buffer ||
-        manager->buffer + ( manager->width * mem_cfg.fw_n_members ) <= (char*)ptr ){
-      manager = NULL;
+  for( i = 0; i < SIZE_CLASSES && manager == NULL; ++i ){
+    manager = fw_bins[i];
+    while( manager ){
+      if( ptr / page_size != manager->page / page_size ){
+        manager = manager->next;
+      }
     }
   }
-  if( manager == NULL ){ /* This case is undefined by the standard definition of free */ }
+
+  if( manager == NULL ){
+    /*Getting here means that a pointer which was never returned by malloc has been
+      passed to free.
+      According to the POSIX standard this behavior is undefined
+     *Failing hard seems pretty reasonable though
+     */
+    exit(1);
+  }
 
   /* TODO: Everything below this line feels very special case heavy */
   curr = manager->available;
