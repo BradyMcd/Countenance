@@ -1,11 +1,11 @@
 
 #include <malloc.h>
+#include <stdlib.h>
 #include <unistd.h>
+#include <stdbool.h>
 
 #include "memory.h"
 
-#define SIZE_CLASSES 32
-static long page_size = sysconfig( _GET_PAGESIZE );
 /**
  * Memory records are of fixed width... hmmm...
  */
@@ -22,7 +22,7 @@ struct fw_manager{
   void *page;
 };
 
-static struct fw_manager fw_bins[SIZE_CLASSES] = NULL;
+static struct fw_manager fw_bins[SIZE_CLASSES];
 
 static fw_record *bs_fw_malloc(){
   return malloc( sizeof( fw_record ) );
@@ -31,7 +31,6 @@ static fw_record *bs_fw_malloc(){
 static void bs_fw_free( fw_record *ptr ){
   free( ptr );
 }
-
 
 /**
  * Variable width, resizable allocations
@@ -77,11 +76,11 @@ fw_record *fw_claim( size_t width ){
      different interface which will mmap() rather than sbrk() to claim space
   */
 
-  size_t n = ( page_size - sizeof( struct fw_manager ) ) / width;
-  struct fw_manager *new = sbrk( page_size );
-  if( new == -1 ){ /*ENOMEM*/ }
+  size_t n = ( PAGE_SIZE - sizeof( struct fw_manager ) ) / width;
+  struct fw_manager *new = sbrk( PAGE_SIZE );
+  if( new == NULL ){ /*ENOMEM*/ }
 
-  new->page = &(new + 1);
+  new->page = &new[1];
   new->next = NULL;
 
   new->available = bs_fw_malloc();
@@ -98,12 +97,11 @@ fw_record *fw_claim( size_t width ){
 
 void *fw_malloc( size_t size ){
 
-  int i;
   struct fw_manager *buffer;
   fw_record *curr = NULL;
   void *ret = NULL;
 
-  buffer = fw_bins[fit_to_size_class( size )];
+  buffer = &fw_bins[fit_to_size_class( size )];
   curr = ( buffer->available != NULL ) ? buffer->available : fw_claim( size );
   if( curr == NULL ){ /* ENOMEM */ }
 
@@ -121,23 +119,41 @@ void *fw_malloc( size_t size ){
   return ret;
 }
 
+/* will return true if both supplied pointers are on the same memory page
+ * requires ugly casting which is why it's in its own function*/
+bool in_page( void *ptra, void *ptrb ){
+
+  size_t a = (size_t)ptra;
+  size_t b = (size_t)ptrb;
+
+  return ( a / PAGE_SIZE ) == ( b / PAGE_SIZE );
+}
+
 void fw_free( void *ptr ){
 
   int i;
   struct fw_manager *manager = NULL;
   fw_record *temp;
   fw_record *curr;
+  size_t width;
 
   if( !ptr ){ return; } /* If ptr is NULL no action is performed */
 
   for( i = 0; i < SIZE_CLASSES && manager == NULL; ++i ){
-    manager = fw_bins[i];
+    manager = &fw_bins[i];
     while( manager ){
-      if( ptr / page_size != manager->page / page_size ){
+      if( !in_page( ptr, manager->page ) ){
         manager = manager->next;
       }
     }
   }
+
+  width = 1 << i;
+
+  /*NOTE: If we find that the pointer is a member of the final size class that means
+    we can't make any statements about width, rw_ and wo_ need to have an inbuilt
+    solution for widths greater than the page size
+  */
 
   if( manager == NULL ){
     /*Getting here means that a pointer which was never returned by malloc has been
@@ -161,13 +177,13 @@ void fw_free( void *ptr ){
 
   /* Reordering these cases have potential performance effects */
   while( 1 ){
-    if( curr->ptr == ptr + manager->width ){
+    if( curr->ptr == ptr + width ){
       curr->ptr = ptr;
       curr->n += 1;
       break;
-    }else if( curr->ptr + ( curr->n * manager->width ) == ptr - manager->width  ){
+    }else if( curr->ptr + ( curr->n * width ) == ptr - width  ){
       curr->n += 1;
-      if( curr->next && curr->next->ptr == ptr + manager->width ){
+      if( curr->next && curr->next->ptr == ptr + width ){
         curr->n += curr->next->n;
         temp = curr->next;
         curr->next = curr->next->next;
